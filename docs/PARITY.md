@@ -1,8 +1,8 @@
 # NotifyKit — Parity (spec vs implementation)
 
 Evidence: the Rust test suite in `src/lib.rs`, `src/ffi.rs`,
-`src/platform.rs` and `src/json.rs` (22 tests, all passing at
-the v0.1.0 gate) plus the header contract in
+`src/platform.rs` and `src/json.rs` (26 tests, all passing at
+the v0.2.0 gate) plus the header contract in
 `include/notifykit.h`. "Verified" below means a named test
 exercises the behaviour. The Windows tray calls cannot run
 on the development VM; their rows say exactly how far the
@@ -27,8 +27,15 @@ evidence goes.
 | Tray calls on non-Windows return NOT_SUPPORTED, never fake success | Verified | platform `tray_calls_are_not_supported_off_windows`, FFI `ffi_tray_is_not_supported_off_windows` (create/show/set_tooltip/remove + argument errors still winning over the platform check) |
 | Header documents every export | Done | `include/notifykit.h` (ownership, error contract, host-window contract, callback message id, text limits, handle lifetime) |
 
+| Tray config `app_id` (AppUserModelID for toasts) parsed and stored on the handle | Verified | `backend_parsing_and_tray_app_id` (value parsed, default "", non-string rejected) |
+| Backend selection per handle: parse "balloon"/"toast", invalid name is INVALID_ARG, default is balloon, state set/get on the handle | Verified | `backend_parsing_and_tray_app_id`, platform `tray_backend_state_defaults_to_balloon_and_switches` |
+| `no_tray_set_backend` on non-Windows returns NOT_SUPPORTED; null handle/name are INVALID_ARG | Verified | platform `tray_calls_are_not_supported_off_windows`, FFI `ffi_tray_is_not_supported_off_windows` |
+| Toast XML: ToastGeneric document from the show title/body, markup escaped, XML-unrepresentable controls stripped | Verified | `toast_xml_shape_and_escaping`, `toast_xml_strips_unrepresentable_controls` |
+| Toast show via WinRT (RoActivateInstance XmlDocument → IXmlDocumentIO::LoadXml → IToastNotificationFactory::CreateToastNotification → CreateToastNotifierWithId(app_id) → IToastNotifier::Show) | Implemented, not run — **Unverified** | `platform.rs` win::winrt: hand-rolled COM over dynamically resolved combase entry points (no new link dependency); every IID and vtable layout verified against the `windows` crate 0.62.2 generated bindings. Compiles + clippy-clean for `x86_64-pc-windows-msvc` at the gate; the gate does not link, and no toast has been shown on a real desktop yet |
+| Toast show without an app_id is NO_ERR_INVALID_ARG, never a borrowed identity | Partial | The check runs in the FFI before the platform call (all platforms) and again in the Windows platform layer; the error path is code-reviewed but can only be exercised end-to-end on Windows, where it is not yet run |
+
 ## Known gaps (also in README "Limitations")
-- v0.1 shows classic balloon tips only; WinRT toasts are roadmap item 1.
+- v0.2 toasts carry title + body text only; buttons/images are roadmap item 5. Toast runtime behaviour is Unverified until a field test on a real desktop.
 - No tray context-menu helper, no click/dismiss event routing yet (roadmap items 2–3).
 - Stock icons only; custom icon files are roadmap item 4.
 - The center is in-memory; persistence is roadmap item 5.
