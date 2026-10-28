@@ -118,7 +118,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[no_mangle]
 pub extern "C" fn no_version() -> *const c_char {
-    static VERSION_C: &[u8] = b"0.1.0\0";
+    static VERSION_C: &[u8] = b"0.2.0\0";
     VERSION_C.as_ptr() as *const c_char
 }
 
@@ -308,12 +308,39 @@ pub extern "C" fn no_tray_show(
             Ok(r) => r,
             Err((code, msg)) => return fail(code, &msg),
         };
+        let tray = lock(&tray.inner);
+        // Toast backend: no fixed-buffer limits, so the
+        // request text goes out in full (escaped into XML
+        // by the platform layer), and nothing is truncated.
+        // An app_id is required — checked here so the
+        // argument error wins over the platform check on
+        // every OS, like other argument errors in this API.
+        if tray.backend == crate::Backend::Toast {
+            if tray.app_id.is_empty() {
+                return fail(
+                    ERR_INVALID_ARG,
+                    "an app_id is required for toasts: set \"app_id\" in the \
+                     no_tray_create config to the host's AppUserModelID",
+                );
+            }
+            return match platform::tray_show_toast(&tray, &req.title, &req.body) {
+                Ok(()) => {
+                    let result = crate::json::obj(vec![
+                        ("shown", crate::json::b(true)),
+                        ("title_truncated", crate::json::b(false)),
+                        ("body_truncated", crate::json::b(false)),
+                    ])
+                    .to_json();
+                    out_string(out_json, result)
+                }
+                Err((code, msg)) => fail(code, &msg),
+            };
+        }
         // Truncate BEFORE the platform call and report the
         // flags in the result: the text the shell displays
         // is exactly the text described here.
         let (title, title_truncated) = crate::truncate_utf16(&req.title, BALLOON_TITLE_MAX_UNITS);
         let (body, body_truncated) = crate::truncate_utf16(&req.body, BALLOON_BODY_MAX_UNITS);
-        let tray = lock(&tray.inner);
         match platform::tray_show(&tray, &title, &body, req.kind, req.timeout_ms) {
             Ok(()) => {
                 let result = crate::json::obj(vec![
@@ -323,6 +350,32 @@ pub extern "C" fn no_tray_show(
                 ])
                 .to_json();
                 out_string(out_json, result)
+            }
+            Err((code, msg)) => fail(code, &msg),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn no_tray_set_backend(handle: *mut NoTray, name: *const c_char) -> c_int {
+    guard(|| {
+        let tray = match tray_ref(handle) {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
+        let name = match cstr(name, "name") {
+            Ok(n) => n,
+            Err((code, msg)) => return fail(code, &msg),
+        };
+        let backend = match crate::Backend::parse(name) {
+            Ok(b) => b,
+            Err((code, msg)) => return fail(code, &msg),
+        };
+        let mut tray = lock(&tray.inner);
+        match platform::tray_set_backend(&mut tray, backend) {
+            Ok(()) => {
+                clear_error();
+                NO_OK as c_int
             }
             Err((code, msg)) => fail(code, &msg),
         }
@@ -508,6 +561,16 @@ mod tests {
         );
         assert_eq!(
             no_tray_remove(std::ptr::null_mut()),
+            ERR_INVALID_ARG as c_int
+        );
+        // Backend selection: null handle / null name are
+        // argument errors on every platform.
+        assert_eq!(
+            no_tray_set_backend(std::ptr::null_mut(), cs("toast").as_ptr()),
+            ERR_INVALID_ARG as c_int
+        );
+        assert_eq!(
+            no_tray_set_backend(std::ptr::null_mut(), std::ptr::null()),
             ERR_INVALID_ARG as c_int
         );
         // A malformed show request is INVALID_ARG, not a

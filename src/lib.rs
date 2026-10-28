@@ -7,17 +7,18 @@
 //!   with coalescing, for hosts that render their own UI. Pure
 //!   logic, identical behaviour on every platform.
 //! - The Windows tray half (`platform`): a real tray icon and
-//!   classic balloon tips via Shell_NotifyIconW. On non-Windows
-//!   targets those calls return ERR_NOT_SUPPORTED — they never
-//!   fake success.
+//!   classic balloon tips via Shell_NotifyIconW, plus — since
+//!   v0.2 — an optional WinRT toast backend selected per tray
+//!   handle. On non-Windows targets those calls return
+//!   ERR_NOT_SUPPORTED — they never fake success.
 
 pub mod ffi;
 pub mod json;
 pub mod platform;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.2.0";
 pub const VERSION_MAJOR: u32 = 0;
-pub const VERSION_MINOR: u32 = 1;
+pub const VERSION_MINOR: u32 = 2;
 pub const VERSION_PATCH: u32 = 0;
 
 // Error codes (mirror include/notifykit.h).
@@ -91,6 +92,78 @@ impl Kind {
             Kind::Error => "error",
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tray show backend (balloon vs WinRT toast)
+// ---------------------------------------------------------------------------
+
+/// Which mechanism a tray handle uses to show a notification:
+/// the classic Shell_NotifyIcon balloon, or a modern WinRT
+/// toast. Selected per handle with `no_tray_set_backend`;
+/// the default is the balloon, which needs no app identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Backend {
+    #[default]
+    Balloon,
+    Toast,
+}
+
+impl Backend {
+    pub fn parse(s: &str) -> NoResult<Backend> {
+        match s {
+            "balloon" => Ok(Backend::Balloon),
+            "toast" => Ok(Backend::Toast),
+            other => invalid(format!("unknown backend \"{other}\" (want balloon|toast)")),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Backend::Balloon => "balloon",
+            Backend::Toast => "toast",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Toast XML construction (pure; the WinRT half consumes this)
+// ---------------------------------------------------------------------------
+
+/// Escape a string for use as XML element text, and make it
+/// safe to hand to an XML parser: `&`, `<`, `>`, `"` and `'`
+/// become entity references, and control characters other
+/// than tab / newline / carriage return are stripped (they
+/// are not representable in XML 1.0 at all — leaving one in
+/// would make LoadXml reject the whole document).
+pub fn xml_escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {
+                // Stripped: not representable in XML 1.0.
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Build the toast XML document for one notification: a
+/// ToastGeneric binding with the title as the first text
+/// element and the body as the second — the same title/body
+/// a balloon show receives, escaped by [`xml_escape_text`].
+pub fn build_toast_xml(title: &str, body: &str) -> String {
+    format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        xml_escape_text(title),
+        xml_escape_text(body)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +554,14 @@ pub struct TrayConfig {
     pub uid: u32,
     pub tooltip: String,
     pub icon: Kind,
+    /// AppUserModelID for the WinRT toast backend ("" =
+    /// none). Only meaningful when the handle's backend is
+    /// set to "toast": a toast is shown under this identity
+    /// and the host must have registered it (e.g. a Start
+    /// menu shortcut carrying the AppUserModelID) for
+    /// Windows to deliver the toast. The balloon backend
+    /// ignores it.
+    pub app_id: String,
 }
 
 impl Default for TrayConfig {
@@ -490,14 +571,15 @@ impl Default for TrayConfig {
             uid: 1,
             tooltip: String::new(),
             icon: Kind::App,
+            app_id: String::new(),
         }
     }
 }
 
 /// Parse a tray config JSON object: `{"hwnd":N,"uid":N,
-/// "tooltip":"...","icon":"app|info|warn|error"}` — every
-/// key optional. `None` and `"{}"` mean all defaults.
-/// Unknown keys are rejected.
+/// "tooltip":"...","icon":"app|info|warn|error",
+/// "app_id":"..."}` — every key optional. `None` and `"{}"`
+/// mean all defaults. Unknown keys are rejected.
 pub fn parse_tray_config(text: Option<&str>) -> NoResult<TrayConfig> {
     let mut cfg = TrayConfig::default();
     let Some(text) = text else { return Ok(cfg) };
@@ -528,6 +610,12 @@ pub fn parse_tray_config(text: Option<&str>) -> NoResult<TrayConfig> {
                     .as_str()
                     .ok_or_else(|| (ERR_INVALID_ARG, "\"icon\" must be a string".to_string()))?;
                 cfg.icon = Kind::parse(s)?;
+            }
+            "app_id" => {
+                cfg.app_id = val
+                    .as_str()
+                    .ok_or_else(|| (ERR_INVALID_ARG, "\"app_id\" must be a string".to_string()))?
+                    .to_string()
             }
             other => return invalid(format!("unknown config key \"{other}\"")),
         }
@@ -812,6 +900,58 @@ mod tests {
         assert_eq!(req.kind, Kind::Info);
         assert!(parse_show_request("{\"title\":\"T\"}").is_err());
         assert!(parse_show_request("{\"title\":\"T\",\"body\":\"B\",\"timeout_ms\":-5}").is_err());
+    }
+
+    #[test]
+    fn toast_xml_shape_and_escaping() {
+        assert_eq!(
+            build_toast_xml("Build done", "3 warnings"),
+            "<toast><visual><binding template=\"ToastGeneric\">\
+             <text>Build done</text><text>3 warnings</text>\
+             </binding></visual></toast>"
+        );
+        // Every markup-significant character is escaped, in
+        // both fields.
+        assert_eq!(
+            xml_escape_text("a & b < c > d \"e\" 'f'"),
+            "a &amp; b &lt; c &gt; d &quot;e&quot; &apos;f&apos;"
+        );
+        // An ampersand that already looks like an entity is
+        // escaped again — the parser must hand back the
+        // literal text, not decode the host's input twice.
+        assert_eq!(xml_escape_text("&lt;"), "&amp;lt;");
+    }
+
+    #[test]
+    fn toast_xml_strips_unrepresentable_controls() {
+        // BEL, ESC, VT and NUL cannot appear in XML 1.0 and
+        // are stripped; tab, newline and CR survive.
+        assert_eq!(
+            xml_escape_text("a\u{7}b\u{1b}c\u{b}d\u{0}e\tf\ng\rh"),
+            "abcde\tf\ng\rh"
+        );
+        // Non-ASCII text passes through untouched (the WinRT
+        // side encodes it as UTF-16 HSTRING).
+        assert_eq!(xml_escape_text("héllo 🎉"), "héllo 🎉");
+    }
+
+    #[test]
+    fn backend_parsing_and_tray_app_id() {
+        assert_eq!(Backend::parse("balloon").unwrap(), Backend::Balloon);
+        assert_eq!(Backend::parse("toast").unwrap(), Backend::Toast);
+        assert_eq!(Backend::default(), Backend::Balloon);
+        assert_eq!(
+            Backend::parse("smoke-signal").unwrap_err().0,
+            ERR_INVALID_ARG
+        );
+        // app_id rides the tray config; absence means "".
+        let cfg = parse_tray_config(Some("{\"app_id\":\"Contoso.MyApp\"}")).unwrap();
+        assert_eq!(cfg.app_id, "Contoso.MyApp");
+        assert_eq!(parse_tray_config(None).unwrap().app_id, "");
+        assert_eq!(
+            parse_tray_config(Some("{\"app_id\":7}")).unwrap_err().0,
+            ERR_INVALID_ARG
+        );
     }
 
     #[test]
