@@ -8,12 +8,13 @@
  *    (raising its count) instead of piling up.
  *
  * 2. A Windows TRAY half: one real tray icon per handle
- *    (Shell_NotifyIconW), with classic balloon tips. On
- *    non-Windows platforms the tray calls return
- *    NO_ERR_NOT_SUPPORTED - they never report a notification
- *    as shown when no platform call happened. v0.1 shows
- *    classic balloon tips, not modern WinRT toast
- *    notifications.
+ *    (Shell_NotifyIconW), with classic balloon tips - or,
+ *    since v0.2, modern WinRT toast notifications when the
+ *    handle's backend is set to "toast" with
+ *    no_tray_set_backend(). On non-Windows platforms the
+ *    tray calls return NO_ERR_NOT_SUPPORTED - they never
+ *    report a notification as shown when no platform call
+ *    happened.
  *
  * Strings: all strings are UTF-8, NUL-terminated.
  *
@@ -57,7 +58,7 @@ extern "C" {
 typedef struct NoCenter NoCenter;
 typedef struct NoTray NoTray;
 
-/* Library version, e.g. "0.1.0". Borrowed string; do not free. */
+/* Library version, e.g. "0.2.0". Borrowed string; do not free. */
 NO_API const char *no_version(void);
 
 /* Last error message on this thread ("" when none). Borrowed. */
@@ -147,7 +148,10 @@ NO_API int no_close(NoCenter *handle);
  *    "uid":N,         icon identifier (uID); default 1
  *    "tooltip":"...", initial tooltip; truncated to 127
  *                     UTF-16 units if longer
- *    "icon":"app|info|warn|error"}  stock icon; default "app"
+ *    "icon":"app|info|warn|error",  stock icon; default "app"
+ *    "app_id":"..."}  AppUserModelID for the WinRT toast
+ *                     backend (see no_tray_set_backend);
+ *                     not used by the balloon backend
  *
  * The WINDOW HANDLE belongs to the host: the host creates
  * and owns its window as usual and passes its HWND as an
@@ -170,8 +174,38 @@ NO_API int no_close(NoCenter *handle);
  * actually succeeded. */
 NO_API int no_tray_create(const char *config_json, NoTray **out_handle);
 
-/* Show a classic balloon tip on the tray icon
- * (NIM_MODIFY with NIF_INFO).
+/* Select how this tray handle shows notifications:
+ * "balloon" (the default) is the classic balloon tip;
+ * "toast" is a modern WinRT toast notification. The
+ * selection is per handle and can be changed at any time.
+ *
+ * Toasts are shown under the AppUserModelID given as
+ * "app_id" in the no_tray_create config. Windows only
+ * delivers a toast for an app identity the host has
+ * registered - in practice the host app's installer or
+ * shortcut must carry that AppUserModelID (e.g. a Start
+ * menu shortcut with the System.AppUserModel.ID property
+ * set to the same string). If the handle has no app_id,
+ * a toast show fails with NO_ERR_INVALID_ARG rather than
+ * borrowing some other app's identity.
+ *
+ * name must be exactly "balloon" or "toast"; anything
+ * else is NO_ERR_INVALID_ARG. On non-Windows platforms
+ * this returns NO_ERR_NOT_SUPPORTED, like the other tray
+ * calls. */
+NO_API int no_tray_set_backend(NoTray *handle, const char *name);
+
+/* Show a notification on the tray icon, using the
+ * handle's selected backend (see no_tray_set_backend):
+ * the classic balloon tip (NIM_MODIFY with NIF_INFO), or
+ * a WinRT toast when the backend is "toast".
+ *
+ * For the BALLOON backend the text limits below apply and
+ * "kind" / "timeout_ms" are honoured. For the TOAST
+ * backend the title and body are sent in full (escaped
+ * into the toast XML), the truncation flags in the
+ * result are always false, and "kind" / "timeout_ms"
+ * have no toast equivalent and are ignored.
  *
  * show_json: one JSON object:
  *   {"title":"...",       required; balloon title
@@ -189,8 +223,9 @@ NO_API int no_tray_create(const char *config_json, NoTray **out_handle);
  * call, and *out_json reports exactly what was shown:
  *   {"shown":true, "title_truncated":bool,
  *    "body_truncated":bool}
- * "shown":true is written only when Shell_NotifyIconW
- * itself succeeded. */
+ * "shown":true is written only when the platform call
+ * itself succeeded (Shell_NotifyIconW for a balloon,
+ * IToastNotifier::Show for a toast). */
 NO_API int no_tray_show(NoTray *handle, const char *show_json,
                         char **out_json);
 
