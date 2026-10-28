@@ -7,6 +7,21 @@ suite — 22/22 passing, run three times with identical
 results. Scores are only claimed where that evidence exists;
 Windows runtime behaviour is not claimed from Linux evidence.
 
+**v0.2.0 addendum (WinRT toast backend).** The v0.2.0 gate
+runs the same steps with 26/26 tests passing. The toast
+backend's pure parts are scored on test evidence: the XML
+builder (exact ToastGeneric shape, escaping, control
+stripping) and backend selection (parse, defaults,
+per-handle state, `app_id` config) are fully tested. The
+WinRT COM glue is **Unverified**: its IIDs and vtable
+layouts were verified against the `windows` crate 0.62.2
+generated bindings, and it compiles + clippy-checks for
+`x86_64-pc-windows-msvc` at the gate — but the gate does
+not LINK, and no toast has been shown on a real desktop.
+A toast dimension is therefore held at 2/5 and is NOT
+counted into the total below until a field test (and CI's
+real Windows link) provide runtime evidence.
+
 | Dimension | Score /5 | Evidence |
 |---|---|---|
 | Coalescing correctness | 5 | Merge + count, window edge (inside at 4 999 ms, separate at 5 002 ms), title/body/kind must all match, disabled at window 0, drained history never re-absorbs — all tested with an injected clock, no sleeps |
@@ -16,6 +31,7 @@ Windows runtime behaviour is not claimed from Linux evidence.
 | API & documentation | 4 | Header documents every export with semantics, the host-window contract, error codes and lifetimes; README has a runnable C example. No compiled C consumer test in the suite (FFI is exercised from Rust) — one point held back |
 | Code health | 5 | Zero dependencies, fmt + clippy clean on both targets at the gate, no unwinding across the FFI boundary, per-test state only (no shared mutable statics) |
 | Platform coverage | 3 | Center fully tested on Linux; the Windows MSVC build is check/clippy-verified here, but the real link and any on-screen balloon are CI's / a field test's to prove — honestly mid-scored |
+| WinRT toast backend (v0.2, provisional — not in total) | 2 | XML builder + backend state fully tested; COM glue verified only against the `windows` crate's generated bindings and the windows-target check/clippy (no link, no run) — held low until a field test shows a toast |
 
 **Total: 85/100**
 

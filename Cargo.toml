@@ -1,10 +1,10 @@
 [package]
 name = "notify-kit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 authors = ["Sean Shaffer"]
-description = "Tray notifications and balloon alerts without WinRT, behind a small C ABI"
+description = "Tray notifications: classic balloon alerts plus a WinRT toast backend, behind a small C ABI"
 license = "MIT"
 repository = "https://github.com/SeanShaffer88/NotifyKit"
 keywords = ["windows", "ffi"]
